@@ -1,4 +1,4 @@
-"""DDP is exact: K steps on N ranks equal K steps of one process on the full batch."""
+"""K DDP steps on N ranks equal K steps of one process on the full batch (float64, 1e-12)."""
 
 import pytest
 import torch
@@ -24,6 +24,15 @@ def _ddp_worker(rank: int, world_size: int, bucket_cap_bytes: int) -> None:
     ref_opt = torch.optim.AdamW(reference.parameters(), lr=1e-2, weight_decay=0.1)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-2, weight_decay=0.1)
     total_bytes = sum(p.numel() * p.element_size() for p in reference.parameters())
+    params = list(model.module.parameters())
+
+    # Overlap: record how many buckets had launched their all-reduce each time a
+    # gradient became ready. These hooks run after DDP's own hook for the same parameter.
+    launched_at_hook: list[int] = []
+    for p in params:
+        p.register_post_accumulate_grad_hook(
+            lambda _: launched_at_hook.append(sum(b.work is not None for b in model.buckets))
+        )
 
     for step in range(STEPS):
         tokens, targets = make_batch(CFG, LOCAL_BATCH * world_size, SEQ_LEN, seed=100 + step)
@@ -33,9 +42,19 @@ def _ddp_worker(rank: int, world_size: int, bucket_cap_bytes: int) -> None:
         lm_loss(reference(tokens), targets).backward()
 
         opt.zero_grad()
+        launched_at_hook.clear()
         with comm.record_comm() as log:
             lm_loss(model(tokens[mine]), targets[mine]).backward()
+            # Every all-reduce was launched from a hook, before backward returned.
+            assert all(b.work is not None for b in model.buckets)
             model.finish_gradient_sync()
+        if len(model.buckets) > 1:
+            # Some all-reduce was already in flight while gradients were still pending.
+            assert any(0 < n < len(model.buckets) for n in launched_at_hook)
+        # Gradients are views into the bucket buffers: no second copy exists.
+        for b in model.buckets:
+            base = b.buffer.untyped_storage().data_ptr()
+            assert all(p.grad.untyped_storage().data_ptr() == base for p in b.params)
 
         # Exactly one all-reduce per bucket, covering every parameter once.
         assert log.calls["all_reduce"] == len(model.buckets)

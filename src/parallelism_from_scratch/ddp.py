@@ -15,6 +15,13 @@ are the point of the design, not optimizations to skip:
   backward produces gradients), and a bucket's all-reduce is launched asynchronously
   from a gradient hook as soon as its last gradient is accumulated, so communication
   for late layers runs while autograd is still computing early layers.
+
+Gradients live in the bucket buffers: each parameter's ``.grad`` is a view into its
+bucket (``gradient_as_bucket_view`` in PyTorch's DDP), so the all-reduce runs in place
+and there is no second full copy of the gradients. If an optimizer's ``zero_grad``
+sets ``.grad`` to ``None``, autograd allocates a fresh gradient for that parameter; the
+hook copies it into the bucket and points ``.grad`` back at the view, so the fresh
+tensor lives only until that parameter's hook has run.
 """
 
 from __future__ import annotations
@@ -36,6 +43,14 @@ class Bucket:
     ready: int = 0
     work: dist.Work | None = field(default=None, repr=False)
 
+    def grad_views(self) -> list[torch.Tensor]:
+        """One view of ``buffer`` per parameter, shaped like the parameter."""
+        views, offset = [], 0
+        for p in self.params:
+            views.append(self.buffer[offset : offset + p.numel()].view_as(p))
+            offset += p.numel()
+        return views
+
 
 class DistributedDataParallel(nn.Module):
     def __init__(self, module: nn.Module, bucket_cap_bytes: int = 25 * 2**20) -> None:
@@ -51,21 +66,32 @@ class DistributedDataParallel(nn.Module):
 
         self.buckets = _make_buckets(params, bucket_cap_bytes)
         self._bucket_of = {id(p): b for b in self.buckets for p in b.params}
+        self._grad_view = {
+            id(p): view
+            for b in self.buckets
+            for p, view in zip(b.params, b.grad_views(), strict=True)
+        }
         for p in params:
+            p.grad = self._grad_view[id(p)]
             p.register_post_accumulate_grad_hook(self._on_grad_ready)
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         return self.module(*args, **kwargs)
 
+    @torch.no_grad()
     def _on_grad_ready(self, param: nn.Parameter) -> None:
+        view = self._grad_view[id(param)]
+        if param.grad.data_ptr() != view.data_ptr():
+            # .grad was reset to None (or replaced), so autograd allocated a new tensor.
+            view.copy_(param.grad)
+            param.grad = view
         bucket = self._bucket_of[id(param)]
         bucket.ready += 1
         if bucket.ready == len(bucket.params):
-            torch.cat([p.grad.reshape(-1) for p in bucket.params], out=bucket.buffer)
             bucket.work = comm.all_reduce(bucket.buffer, async_op=True)
 
     def finish_gradient_sync(self) -> None:
-        """Wait for all bucket all-reduces and write the averaged gradients back.
+        """Wait for all bucket all-reduces and average the gradients in place.
 
         Call between ``loss.backward()`` and ``optimizer.step()``. It is explicit
         (rather than an autograd end-of-backward callback) so the synchronization
@@ -78,12 +104,7 @@ class DistributedDataParallel(nn.Module):
                     "in this backward pass, so ranks would deadlock on the all-reduce"
                 )
             bucket.work.wait()
-            bucket.buffer.div_(self.world_size)
-            offset = 0
-            for p in bucket.params:
-                n = p.numel()
-                p.grad.copy_(bucket.buffer[offset : offset + n].view_as(p))
-                offset += n
+            bucket.buffer.div_(self.world_size)  # the parameters' .grad are views into it
             bucket.ready, bucket.work = 0, None
 
 
@@ -115,4 +136,4 @@ def _bucket(params: list[nn.Parameter]) -> Bucket:
     if len({p.dtype for p in params}) != 1:
         raise TypeError("a bucket is one flat buffer, so its parameters must share a dtype")
     numel = sum(p.numel() for p in params)
-    return Bucket(params=params, buffer=torch.empty(numel, dtype=params[0].dtype))
+    return Bucket(params=params, buffer=torch.zeros(numel, dtype=params[0].dtype))

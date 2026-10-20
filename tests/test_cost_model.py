@@ -70,8 +70,9 @@ def _measured_memory_worker(rank: int, world_size: int) -> None:
     tokens, targets = make_batch(CFG, batch_size=2, seq_len=8, seed=rank)
     num_params = sum(p.numel() for p in build_reference(CFG).parameters())
 
-    # DDP: full parameters, full gradients, full torch.optim.AdamW moments.
-    model = DistributedDataParallel(build_reference(CFG))
+    # DDP: full parameters, full gradients, full torch.optim.AdamW moments. Every
+    # gradient buffer DDP owns is counted: the .grad tensors and the bucket buffers.
+    model = DistributedDataParallel(build_reference(CFG), bucket_cap_bytes=4096)
     opt = torch.optim.AdamW(model.parameters())
     with comm.record_comm() as log:
         lm_loss(model(tokens), targets).backward()
@@ -81,7 +82,8 @@ def _measured_memory_worker(rank: int, world_size: int) -> None:
     moments = [opt.state[p][k] for p in params for k in ("exp_avg", "exp_avg_sq")]
     expected = data_parallel_memory(num_params, world_size, "ddp", FP64_ADAM)
     assert _nbytes(params) == expected.params
-    assert _nbytes([p.grad for p in params]) == expected.grads
+    grad_buffers = [p.grad for p in params] + [b.buffer for b in model.buckets]
+    assert _storage_bytes(grad_buffers) == expected.grads
     assert _nbytes(moments) == expected.optimizer
     assert dict(log.bytes) == data_parallel_comm_payload(num_params, world_size, "ddp", 8)
 
