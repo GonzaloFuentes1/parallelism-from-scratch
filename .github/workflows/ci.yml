@@ -21,19 +21,27 @@ jobs:
         run: uvx ruff format --check .
 
   test:
+    name: test (py${{ matrix.python-version }}, torch ${{ matrix.torch }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        torch: ["latest"]
+        include:
+          # The lower bound declared in pyproject.toml.
+          - python-version: "3.11"
+            torch: "2.6.*"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Create environment
         run: uv venv --python ${{ matrix.python-version }} .venv
       - name: Install CPU-only torch
-        run: uv pip install --python .venv torch --index-url https://download.pytorch.org/whl/cpu
+        env:
+          TORCH_SPEC: ${{ matrix.torch == 'latest' && 'torch' || format('torch=={0}', matrix.torch) }}
+        run: uv pip install --python .venv "$TORCH_SPEC" --index-url https://download.pytorch.org/whl/cpu
       - name: Install package
         run: uv pip install --python .venv -e ".[dev]"
       - name: Versions

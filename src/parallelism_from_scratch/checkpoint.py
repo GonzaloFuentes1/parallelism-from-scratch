@@ -16,6 +16,7 @@ path as converting a sharded training checkpoint to a Hugging Face style file).
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import torch
@@ -73,6 +74,11 @@ def consolidate_to_safetensors(path: str | Path, out_file: str | Path) -> dict[s
         name: torch.empty(meta.size, dtype=meta.properties.dtype)
         for name, meta in metadata.state_dict_metadata.items()
     }
-    dcp.load(full, checkpoint_id=str(path), no_dist=True)
+    # Newer torch takes ``no_dist`` explicitly; torch 2.6 has no such argument and loads
+    # in a single process on its own when no process group is initialized.
+    single_process = (
+        {"no_dist": True} if "no_dist" in inspect.signature(dcp.load).parameters else {}
+    )
+    dcp.load(full, checkpoint_id=str(path), **single_process)
     save_file(full, str(out_file))
     return full
