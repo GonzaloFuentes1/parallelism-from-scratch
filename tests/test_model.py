@@ -60,6 +60,26 @@ def test_rope_scores_depend_only_on_relative_position() -> None:
     assert math.isclose(score(0, 0), float(q @ k), abs_tol=1e-12)
 
 
+def test_rope_matches_the_hugging_face_rotate_half_layout() -> None:
+    # The relative-position test above holds for any valid rotation, including a
+    # flipped sine or an interleaved pair layout. This pins the exact convention used by
+    # Hugging Face Llama: q * cos + rotate_half(q) * sin, with the angle table repeated
+    # over both halves and rotate_half(x) = cat(-x2, x1).
+    head_dim, seq_len = 8, 6
+    cos, sin = rope_tables(head_dim, seq_len, theta=10000.0, dtype=torch.float64)
+    x = torch.randn(2, seq_len, 3, head_dim, generator=torch.Generator().manual_seed(2))
+    x = x.double()
+
+    def rotate_half(t: torch.Tensor) -> torch.Tensor:
+        t1, t2 = t[..., : head_dim // 2], t[..., head_dim // 2 :]
+        return torch.cat([-t2, t1], dim=-1)
+
+    cos_full = torch.cat([cos, cos], dim=-1)[None, :, None, :]
+    sin_full = torch.cat([sin, sin], dim=-1)[None, :, None, :]
+    expected = x * cos_full + rotate_half(x) * sin_full
+    torch.testing.assert_close(apply_rope(x, cos, sin), expected, rtol=0, atol=0)
+
+
 def test_logits_are_causal() -> None:
     model = build_reference(CFG, seed=0)
     tokens, _ = make_batch(CFG, batch_size=2, seq_len=12, seed=0)
