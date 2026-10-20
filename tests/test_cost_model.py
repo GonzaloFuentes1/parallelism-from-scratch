@@ -60,6 +60,12 @@ def _nbytes(tensors: list[torch.Tensor]) -> int:
     return sum(t.numel() * t.element_size() for t in tensors)
 
 
+def _storage_bytes(tensors: list[torch.Tensor]) -> int:
+    """Bytes of the distinct storages behind ``tensors`` (views count their whole buffer)."""
+    storages = {t.untyped_storage().data_ptr(): t.untyped_storage().nbytes() for t in tensors}
+    return sum(storages.values())
+
+
 def _measured_memory_worker(rank: int, world_size: int) -> None:
     tokens, targets = make_batch(CFG, batch_size=2, seq_len=8, seed=rank)
     num_params = sum(p.numel() for p in build_reference(CFG).parameters())
@@ -79,17 +85,24 @@ def _measured_memory_worker(rank: int, world_size: int) -> None:
     assert _nbytes(moments) == expected.optimizer
     assert dict(log.bytes) == data_parallel_comm_payload(num_params, world_size, "ddp", 8)
 
+    # ZeRO: every buffer that holds parameters, gradients or optimizer state after the
+    # step, counted by storage, so views and padding are included. With one bucket (the
+    # default cap is far above this model) the padding is the formulas' ceil(P / N).
     for stage, strategy in ((1, "zero1"), (2, "zero2")):
         model = build_reference(CFG)
         zero = ZeroAdamW(model.parameters(), AdamWConfig(), stage=stage)
-        lm_loss(model(tokens), targets).backward()
+        assert len(zero.buckets) == 1
         with comm.record_comm() as log:
+            lm_loss(model(tokens), targets).backward()
             zero.step()
         expected = data_parallel_memory(num_params, world_size, strategy, FP64_ADAM)
-        grads = [p.grad for p in model.parameters()] if stage == 1 else [zero.grad_shard]
-        assert _nbytes(list(model.parameters())) == expected.params
-        assert _nbytes(grads) == expected.grads
-        assert _nbytes(zero.optimizer_state_tensors()) == expected.optimizer
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        if zero.grad_shard is not None:
+            grads.append(zero.grad_shard)
+        assert zero._in_flight is None
+        assert _storage_bytes(list(model.parameters())) == expected.params
+        assert _storage_bytes(grads) == expected.grads
+        assert _storage_bytes(zero.optimizer_state_tensors()) == expected.optimizer
         assert dict(log.bytes) == data_parallel_comm_payload(num_params, world_size, strategy, 8)
 
 

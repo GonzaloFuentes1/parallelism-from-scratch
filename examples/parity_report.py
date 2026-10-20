@@ -27,6 +27,7 @@ from parallelism_from_scratch.zero import ZeroAdamW
 CFG = LlamaConfig(n_layers=4)
 OPT = AdamWConfig(lr=1e-2, weight_decay=0.1)
 STEPS, LOCAL_BATCH, SEQ_LEN = 3, 2, 16
+BUCKET_CAP_BYTES = 4096  # several buckets, so bucketed communication is exercised
 
 
 def _max_diff(pairs: list[tuple[torch.Tensor, torch.Tensor]]) -> float:
@@ -47,12 +48,15 @@ def _data_parallel(rank: int, world: int, strategy: str) -> tuple[float, float]:
     ref_opt = _torch_adamw(reference)
     model = build_reference(CFG)
     if strategy == "ddp":
-        wrapped = DistributedDataParallel(model)
+        wrapped = DistributedDataParallel(model, bucket_cap_bytes=BUCKET_CAP_BYTES)
         opt = _torch_adamw(model)
     else:
         wrapped = model
-        opt = ZeroAdamW(model.parameters(), OPT, stage=int(strategy[-1]))
-    # ZeRO never materializes the averaged full gradient, so only DDP reports one.
+        opt = ZeroAdamW(
+            model.parameters(), OPT, stage=int(strategy[-1]), bucket_cap_bytes=BUCKET_CAP_BYTES
+        )
+    # ZeRO-1 never materializes the averaged full gradient; ZeRO-2 keeps its shards,
+    # which are gathered back for the comparison.
     grad_diff = float("nan")
     for step in range(STEPS):
         tokens, targets = make_batch(CFG, LOCAL_BATCH * world, SEQ_LEN, seed=step)
@@ -68,6 +72,9 @@ def _data_parallel(rank: int, world: int, strategy: str) -> tuple[float, float]:
                 grad_diff = _max_diff([(p.grad, q.grad) for p, q in pairs])
         ref_opt.step()
         opt.step()
+        if strategy == "zero2" and step == 0:
+            ref_grad = torch.cat([q.grad.reshape(-1) for q in reference.parameters()])
+            grad_diff = _max_diff([(opt.gather_full(opt.grad_shard), ref_grad)])
     pairs = zip(model.parameters(), reference.parameters(), strict=True)
     return grad_diff, _max_diff([(p.detach(), q.detach()) for p, q in pairs])
 

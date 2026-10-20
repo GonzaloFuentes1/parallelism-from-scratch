@@ -87,19 +87,28 @@ class DistributedDataParallel(nn.Module):
             bucket.ready, bucket.work = 0, None
 
 
-def _make_buckets(params: list[nn.Parameter], cap_bytes: int) -> list[Bucket]:
-    buckets: list[Bucket] = []
+def group_into_buckets(params: list[nn.Parameter], cap_bytes: int) -> list[list[nn.Parameter]]:
+    """Group parameters in reverse registration order into buckets of about ``cap_bytes``.
+
+    A bucket closes on the first parameter that brings it to the cap. Shared with ZeRO
+    stage 2, which reduce-scatters gradients bucket by bucket in the same order.
+    """
+    groups: list[list[nn.Parameter]] = []
     current: list[nn.Parameter] = []
     size = 0
     for p in reversed(params):
         current.append(p)
         size += p.numel() * p.element_size()
         if size >= cap_bytes:
-            buckets.append(_bucket(current))
+            groups.append(current)
             current, size = [], 0
     if current:
-        buckets.append(_bucket(current))
-    return buckets
+        groups.append(current)
+    return groups
+
+
+def _make_buckets(params: list[nn.Parameter], cap_bytes: int) -> list[Bucket]:
+    return [_bucket(group) for group in group_into_buckets(params, cap_bytes)]
 
 
 def _bucket(params: list[nn.Parameter]) -> Bucket:
