@@ -101,7 +101,15 @@ def run_pipeline_step(
     Sends are asynchronous so that two neighbouring stages that both send before they
     receive (which 1F1B does in its steady state) cannot deadlock; receives block,
     which is what enforces the data dependencies.
+
+    The batch must split into ``n_microbatches`` equal microbatches: receive buffers
+    are sized from the first one, and dividing each microbatch loss by
+    ``n_microbatches`` equals the full-batch mean only for equal sizes.
     """
+    if tokens.shape[0] % n_microbatches != 0:
+        raise ValueError(
+            f"batch size {tokens.shape[0]} is not divisible by n_microbatches={n_microbatches}"
+        )
     rank = dist.get_rank()
     token_mbs, target_mbs = tokens.chunk(n_microbatches), targets.chunk(n_microbatches)
     mb, seq = token_mbs[0].shape
