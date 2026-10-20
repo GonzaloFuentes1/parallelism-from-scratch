@@ -89,10 +89,15 @@ and its backward is the local slice of `softmax - one_hot`.
 **Distributed checkpointing** (`checkpoint.py`). Each local shard is wrapped as a
 `DTensor` whose placement comes from the same `shard_dim` table used to load weights,
 and `torch.distributed.checkpoint` writes every rank's shards in parallel with metadata
-describing global shapes. Loading at another tensor-parallel size reads only the
-slices each rank needs. Consolidation is the single-process case of the same mechanism:
-full-size tensors built from the checkpoint metadata are loaded with `no_dist=True`
-and written to one safetensors file.
+describing global shapes. Loading at another tensor-parallel size reads, on each
+rank, only the saved chunks that overlap the slices it needs, then copies the
+overlapping region; a chunk is read whole, so a TP=4 rank reloading a TP=2 checkpoint
+reads a full TP=2 shard to use half of it. Consolidation is the single-process case of
+the same mechanism: full-size tensors built from the checkpoint metadata are loaded in
+one process and written to one safetensors file. Its keys are this repository's
+parameter names (`tok_emb.weight`, `layers.0.attn.wq.weight`, ...), so loading it into
+a Hugging Face Llama would need at least a key rename; that is not implemented or
+tested here.
 
 **Pipeline parallelism** (`pipeline.py`). Stages are contiguous layer ranges; the
 first owns the embedding, the last the norm, head and loss. Schedules are explicit
@@ -109,7 +114,10 @@ parameter count and activation all-reduce payload.
 ## How it is verified
 
 All distributed tests spawn real processes (`launch.run_distributed`, gloo over a
-per-test `FileStore`) and assert inside each rank. Tolerances are absolute, at float64.
+per-test `FileStore`) and assert inside each rank. Tolerances are absolute, at float64:
+parity with the single-process reference is asserted at `atol=1e-12`, not as exact
+equality (the measured deviations below are at rounding level, not zero). Checks
+described as bitwise use `atol=0` or `torch.equal`.
 
 | Test file | What it checks |
 |---|---|
@@ -126,24 +134,34 @@ per-test `FileStore`) and assert inside each rank. Tolerances are absolute, at f
 
 Largest absolute deviation from the single-process float64 reference, measured with
 `python examples/parity_report.py` (tiny Llama with 4 layers, 3 AdamW steps,
-`lr=1e-2`) on Windows 11, Intel Core i7-13620H, Python 3.12, torch 2.14.1+cpu:
+`lr=1e-2`, 4096-byte buckets for DDP and ZeRO) on Windows 11, Intel Core i7-13620H,
+Python 3.12, torch 2.14.1+cpu, at commit `2a5341c`:
 
 | Strategy | Ranks | Max abs gradient difference (step 1) | Max abs parameter difference (after 3 steps) |
 |---|---|---|---|
 | DDP | 2 | 3.5e-17 | 1.6e-14 |
 | ZeRO-1 | 2 | n/a | 1.6e-14 |
-| ZeRO-2 | 4 | n/a | 8.4e-14 |
+| ZeRO-2 | 4 | 2.4e-17 | 8.0e-14 |
 | Tensor parallel | 2 | 5.6e-17 | 2.8e-14 |
 | Tensor parallel | 4 | 5.6e-17 | 2.8e-14 |
 | Pipeline, GPipe | 2 | 2.4e-17 | n/a |
 | Pipeline, 1F1B | 4 | 2.4e-17 | n/a |
 
-ZeRO never materializes the averaged full gradient, so only its parameters are
-compared. The pipeline report covers one forward/backward pass.
+ZeRO-1 never materializes the averaged full gradient, so only its parameters are
+compared; ZeRO-2's gradient column compares its gradient shards, gathered back. The
+pipeline report covers one forward/backward pass.
 
-The full suite (36 tests) ran in 61.7 s on Python 3.11 and 68.1 s on Python 3.12 on
-GitHub Actions `ubuntu-latest` with torch 2.14.1+cpu (`python -m pytest -v
---durations=10`, CI run 39506354157).
+Wall-clock times of the full suite (39 tests, `python -m pytest -v --durations=10`):
+
+| Where | Python | torch | Suite |
+|---|---|---|---|
+| GitHub Actions `ubuntu-latest` | 3.11 | 2.6.0+cpu | 54.0 s |
+| GitHub Actions `ubuntu-latest` | 3.11 | 2.14.1+cpu | 92.6 s |
+| GitHub Actions `ubuntu-latest` | 3.12 | 2.14.1+cpu | 84.4 s |
+| Windows 11, Intel Core i7-13620H | 3.12 | 2.14.1+cpu | 337.8 s |
+
+The CI rows are from the [main-branch run for commit `2a5341c`](https://github.com/GonzaloFuentes1/parallelism-from-scratch/actions/runs/39514891571).
+On the same Windows laptop `examples/parity_report.py` took 120 s.
 
 ## Quickstart
 
@@ -153,8 +171,11 @@ cd parallelism-from-scratch
 uv venv --python 3.12 .venv
 uv pip install --python .venv torch --index-url https://download.pytorch.org/whl/cpu
 uv pip install --python .venv -e ".[dev]"
-.venv/bin/python examples/parity_report.py
+.venv/bin/python examples/parity_report.py   # Windows: .venv\Scripts\python
 ```
+
+`parity_report.py` spawns seven process groups one after another and prints one table
+row per group; it took 120 s on the Windows laptop above.
 
 A data-parallel training step, run on 2 CPU processes:
 
@@ -193,9 +214,10 @@ if __name__ == "__main__":
 .venv/bin/ruff check . && .venv/bin/ruff format --check .
 ```
 
-Linux CI is the source of truth. Spawning processes is much slower on Windows, and
-gloo on Windows can occasionally fail to connect; each test uses its own `FileStore`
-in a temporary directory, so tests never compete for a port.
+On Windows replace `.venv/bin/` with `.venv\Scripts\`. Linux CI is the source of
+truth. Spawning processes is slower on Windows (see the timings above), and gloo on
+Windows can occasionally fail to connect; each test uses its own `FileStore` in a
+temporary directory, so tests never compete for a port.
 
 ## Layout
 

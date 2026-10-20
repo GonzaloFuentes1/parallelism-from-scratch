@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "parallelism-from-scratch"
 version = "0.1.0"
-description = "Readable DDP, ZeRO, tensor and pipeline parallelism for a tiny Llama, with exact parity tests on CPU and DCP resharding"
+description = "Readable DDP, ZeRO-1/2, tensor and pipeline parallelism for a tiny Llama, with float64 parity tests (atol 1e-12) on CPU and DCP resharding"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

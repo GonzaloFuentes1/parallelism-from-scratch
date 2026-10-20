@@ -4,8 +4,6 @@ title: "parallelism-from-scratch: readable DDP, ZeRO, tensor and pipeline parall
 authors:
   - family-names: Fuentes
     given-names: Gonzalo
-version: 0.1.0
-date-released: 2026-10-20
 license: MIT
 repository-code: "https://github.com/GonzaloFuentes1/parallelism-from-scratch"
 keywords:
