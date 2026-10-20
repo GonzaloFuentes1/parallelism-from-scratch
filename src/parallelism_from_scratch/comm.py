@@ -95,6 +95,11 @@ def send(tensor: torch.Tensor, dst: int) -> None:
     dist.send(tensor, dst=dst)
 
 
+def isend(tensor: torch.Tensor, dst: int) -> dist.Work:
+    _record("send", tensor)
+    return dist.isend(tensor, dst=dst)
+
+
 def recv(tensor: torch.Tensor, src: int) -> None:
     _record("recv", tensor)
     dist.recv(tensor, src=src)
