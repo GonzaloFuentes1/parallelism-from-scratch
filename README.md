@@ -40,7 +40,9 @@ the payload per training step under the convention in `comm.py`.
 | Tensor parallel | `tensor_parallel.py` | every weight matrix, the vocabulary | 2 activation all-reduces per layer in forward, 2 in backward | about `16 P / N` (norm weights replicated) |
 | Pipeline | `pipeline.py` | layers | point-to-point activations forward, their gradients backward, per microbatch and stage boundary | about `16 P / N` |
 
-ZeRO-3 appears only in the cost model; it is not implemented here.
+ZeRO-3 appears only in the cost model; it is not implemented here. The memory column
+counts the buffers kept between steps; `test_cost_model.py` checks its float64
+analogue against the buffers DDP and ZeRO-1/2 actually hold after a step.
 
 ## Design notes
 
@@ -58,14 +60,19 @@ with backward of early layers. `finish_gradient_sync()` waits, divides by `N` an
 writes the averages back. Averaging gradients of equal-sized local batches equals the
 gradient of the mean loss over the concatenated batch.
 
-**ZeRO-1 and ZeRO-2** (`zero.py`, `optim.py`). Parameters become views into one flat
-buffer padded to a multiple of `N` and cut into `N` contiguous shards. After backward a
-reduce-scatter leaves each rank with the averaged gradient of its shard; AdamW updates
-only that shard (legal because AdamW is elementwise, so shard boundaries need not align
-with parameters); an all-gather writes the updated shards back into every rank's
-parameters. Stage 2 then drops the full gradients and keeps only the reduced shard.
-Here the reduce-scatter runs once after backward rather than per bucket during it, so
-stage 2 lowers the steady-state gradient footprint, not the transient peak.
+**ZeRO-1 and ZeRO-2** (`zero.py`, `optim.py`). Parameters are grouped into buckets in
+the same backward order as DDP; each bucket is a flat buffer padded to a multiple of `N`
+and cut into `N` contiguous shards, and parameters become views into these buffers. A
+reduce-scatter per bucket leaves each rank with the averaged gradient of its shards;
+AdamW updates only those shards (legal because AdamW is elementwise, so shard
+boundaries need not align with parameters); an all-gather per bucket writes the updated
+shards back into every rank's parameters. Stage 1 keeps the full `.grad` of every
+parameter and reduce-scatters inside `step()`, one bucket-sized copy at a time. Stage 2
+reduce-scatters each bucket from a post-accumulate-grad hook during backward and
+releases that bucket's full gradients at once, accumulating the averaged shards into a
+persistent buffer of `P / N`. During backward the full gradients alive are the buckets
+still being filled plus one bucket in flight; when backward returns no parameter holds
+a `.grad`.
 
 **Tensor parallelism** (`tensor_parallel.py`). Column-parallel `wq`, `wk`, `wv`, `w1`,
 `w3` and `lm_head` split output features; for attention that is whole heads, so
@@ -107,11 +114,11 @@ per-test `FileStore`) and assert inside each rank. Tolerances are absolute, at f
 | `test_model.py` | attention equals `F.scaled_dot_product_attention`; RMSNorm equals `F.rms_norm`; RoPE scores depend only on relative position; logits are causal; initial loss is close to `log(V)`; seeded init is deterministic; AdamW lowers the loss |
 | `test_comm.py` | all-reduce, reduce-scatter, all-gather and max match closed-form results at 2 and 4 ranks; metered payloads; a failure on one rank fails the caller |
 | `test_ddp.py` | gradients at every step and parameters after 3 AdamW steps equal one process on the concatenated batch (`atol=1e-12`) at 2 ranks with several buckets and 4 ranks with one; non-zero ranks start from other weights to prove the broadcast; one all-reduce per bucket covering the model once |
-| `test_zero.py` | functional AdamW equals `torch.optim.AdamW`; AdamW on disjoint slices equals AdamW on the whole (bitwise); ZeRO-1 at 2 ranks and ZeRO-2 at 3 ranks (padding) equal unsharded AdamW after every step; gathered moment shards equal the reference moments; payload is one reduce-scatter and one all-gather |
+| `test_zero.py` | functional AdamW equals `torch.optim.AdamW`; AdamW on disjoint slices equals AdamW on the whole (bitwise); with several buckets, ZeRO-1 at 2 ranks and ZeRO-2 at 3 ranks (per-bucket padding) equal unsharded AdamW after every step; both gathered moment shards equal the reference moments; ZeRO-2's gathered gradient shards equal the full-batch gradient; ZeRO-2 reduce-scatters every bucket before backward returns, leaves no `.grad`, and at every gradient hook holds no full gradient of an already reduced bucket and at most twice the largest bucket in total; payload is one reduce-scatter and one all-gather per bucket covering the padded buffer once |
 | `test_tensor_parallel.py` | at TP=2 and TP=4: gathered logits, loss, every gradient shard and parameters after 3 AdamW steps equal the reference; all-reduce counts in forward and backward match the design; vocab-parallel CE with logits offset by `1e4` is finite and equals `F.cross_entropy` loss and gradients; shards reassemble bitwise |
 | `test_checkpoint.py` | save at TP=2, reload at TP=4, re-save, reload at TP=2: shards bitwise equal and logits equal; both checkpoints consolidate to safetensors that are bitwise equal to the saved model with bitwise-equal logits |
 | `test_pipeline.py` | 1F1B is a valid FIFO reordering of GPipe; both schedules give reference gradients and loss with 2 stages and 4 microbatches; peak in-flight microbatches is `M` for GPipe and `S - s` for 1F1B |
-| `test_cost_model.py` | the 16 bytes/param baseline; ZeRO paper Figure 1 (7.5B parameters, 64 GPUs: 120, 31.4, 16.6 and 1.9 GB); ZeRO-1 ring volume equals DDP; formulas equal the bytes actually allocated by DDP and ZeRO-1/2 at 3 ranks and the metered payloads; TP parameter count and all-reduce payload equal what is allocated and sent |
+| `test_cost_model.py` | the 16 bytes/param baseline; ZeRO paper Figure 1 (7.5B parameters, 64 GPUs: 120, 31.4, 16.6 and 1.9 GB); ZeRO-1 ring volume equals DDP; formulas equal the storage of the buffers DDP and ZeRO-1/2 keep after a step at 3 ranks (counted by storage, so ZeRO's padding is included; transient bucket copies are not) and the metered payloads; TP parameter count and all-reduce payload equal what is allocated and sent |
 
 ## Measured results
 

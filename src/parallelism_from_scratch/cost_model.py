@@ -55,14 +55,21 @@ def data_parallel_memory(
 ) -> MemoryPerRank:
     """Bytes of model state held by one data-parallel rank.
 
-    Sharded quantities use ``ceil(P / N)`` because the flat buffer is padded to a
-    multiple of the world size; the paper's ``P / N`` is the same up to that padding.
+    Sharded quantities use ``ceil(P / N)`` because ZeRO's flat buffer is padded to a
+    multiple of the world size, and that padded buffer is also what holds ZeRO's full
+    parameters; the paper's ``P / N`` and ``P`` are the same up to that padding. The
+    implementation pads each gradient bucket separately, so with ``B`` buckets the
+    sharded terms grow by at most ``B - 1`` elements over this formula.
+
+    These are the buffers kept between steps. Transient buffers are not included:
+    ZeRO copies one bucket at a time into a bucket-sized buffer for its reduce-scatter.
     """
     full, shard = num_params, math.ceil(num_params / world_size)
+    padded = shard * world_size
     params, grads, optim = {
         "ddp": (full, full, full),
-        "zero1": (full, full, shard),
-        "zero2": (full, shard, shard),
+        "zero1": (padded, full, shard),
+        "zero2": (padded, shard, shard),
         "zero3": (shard, shard, shard),
     }[strategy]
     return MemoryPerRank(
