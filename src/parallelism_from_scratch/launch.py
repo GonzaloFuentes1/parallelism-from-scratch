@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -32,13 +33,17 @@ def _entry(rank: int, fn: Worker, world_size: int, store_path: str, args: tuple[
     dist.init_process_group(
         "gloo", store=store, rank=rank, world_size=world_size, timeout=_COLLECTIVE_TIMEOUT
     )
+    fn(rank, world_size, *args)
     try:
-        fn(rank, world_size, *args)
-        # A trailing barrier makes a rank that finished early wait for the others,
-        # so an exception on one rank is reported instead of a peer timing out.
         dist.barrier()
-    finally:
-        dist.destroy_process_group()
+    except RuntimeError:
+        # The barrier only fails when a peer died, and the peer's exception is the
+        # informative one. Stay alive until ``spawn`` notices the dead peer, reports
+        # its traceback and terminates this process, instead of racing it with a
+        # less useful "connection closed" error.
+        time.sleep(_COLLECTIVE_TIMEOUT.total_seconds())
+        raise
+    dist.destroy_process_group()
 
 
 def run_distributed(fn: Worker, world_size: int, *args: Any) -> None:
