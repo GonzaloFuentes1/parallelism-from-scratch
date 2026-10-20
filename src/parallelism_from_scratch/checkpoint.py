@@ -8,10 +8,13 @@ global shape and which chunk lives where.
 
 That metadata is what makes **resharding** possible: on load, each rank states which
 global slices it needs (via the placements of the ``DTensor`` it loads into), and DCP
-reads exactly those byte ranges, whatever world size wrote them. Loading into plain
-full-size tensors in a single process is the degenerate case of the same mechanism,
-and is how :func:`consolidate_to_safetensors` produces a single-file export (the same
-path as converting a sharded training checkpoint to a Hugging Face style file).
+reads only the saved chunks that overlap those slices, whatever world size wrote them,
+then copies the overlapping region. A saved chunk is read whole: when reloading at
+TP=4 a checkpoint written at TP=2, each rank reads a full TP=2 shard to use half of it.
+Loading into plain full-size tensors in a single process is the degenerate case of the
+same mechanism, and is how :func:`consolidate_to_safetensors` produces a single-file
+safetensors export. Its keys are this repository's parameter names; loading it into a
+Hugging Face Llama would also need a key rename, which is not implemented or tested.
 """
 
 from __future__ import annotations

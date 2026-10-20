@@ -2,7 +2,7 @@
 
 The architecture follows Llama (pre-norm RMSNorm, rotary position embeddings, SwiGLU
 MLP, causal multi-head attention, untied output head) at toy sizes. Two choices are
-made specifically so it can serve as an *exact* reference:
+made specifically so it can serve as a deterministic float64 reference:
 
 * Attention is written out explicitly (no fused kernel), so the float64 computation
   is the same on every platform and every rank.
@@ -70,8 +70,9 @@ def rope_tables(
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Rotate channel pairs ``(i, i + head_dim/2)`` of ``x: [B, T, H, head_dim]``.
 
-    This is the "rotate half" layout used by Hugging Face Llama checkpoints, so a
-    consolidated state dict maps onto that convention without permuting weights.
+    This is the "rotate half" layout used by Hugging Face Llama, pinned bitwise by
+    ``tests/test_model.py``. Loading Hugging Face weights is not implemented or tested,
+    and parameter names differ from Hugging Face's.
     """
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]

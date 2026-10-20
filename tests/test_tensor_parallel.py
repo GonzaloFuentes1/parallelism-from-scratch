@@ -101,7 +101,7 @@ def _vocab_ce_worker(rank: int, world_size: int) -> None:
     _assert_close(local.grad, expected_full.grad[:, rank * width : (rank + 1) * width], "grad")
 
 
-def test_vocab_parallel_cross_entropy_is_exact_and_stable() -> None:
+def test_vocab_parallel_cross_entropy_matches_reference_and_is_stable() -> None:
     run_distributed(_vocab_ce_worker, 3)
 
 
