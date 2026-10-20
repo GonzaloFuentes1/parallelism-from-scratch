@@ -104,7 +104,7 @@ per-test `FileStore`) and assert inside each rank. Tolerances are absolute, at f
 
 | Test file | What it checks |
 |---|---|
-| `test_model.py` | attention equals `F.scaled_dot_product_attention`; RMSNorm equals `F.rms_norm`; RoPE scores depend only on relative position; logits are causal; initial loss is close to `log(V)`; seeded init is deterministic; AdamW lowers the loss |
+| `test_model.py` | attention equals `F.scaled_dot_product_attention`; RMSNorm equals `F.rms_norm`; RoPE equals the Hugging Face rotate-half formula bitwise and its scores depend only on relative position; logits are causal; initial loss is close to `log(V)`; seeded init is deterministic; AdamW lowers the loss |
 | `test_comm.py` | all-reduce, reduce-scatter, all-gather and max match closed-form results at 2 and 4 ranks; metered payloads; a failure on one rank fails the caller |
 | `test_ddp.py` | gradients at every step and parameters after 3 AdamW steps equal one process on the concatenated batch (`atol=1e-12`) at 2 ranks with several buckets and 4 ranks with one; non-zero ranks start from other weights to prove the broadcast; one all-reduce per bucket covering the model once |
 | `test_zero.py` | functional AdamW equals `torch.optim.AdamW`; AdamW on disjoint slices equals AdamW on the whole (bitwise); ZeRO-1 at 2 ranks and ZeRO-2 at 3 ranks (padding) equal unsharded AdamW after every step; gathered moment shards equal the reference moments; payload is one reduce-scatter and one all-gather |
