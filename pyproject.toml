@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "parallelism-from-scratch"
+version = "0.1.0"
+description = "Readable DDP, ZeRO, tensor and pipeline parallelism for a tiny Llama, with exact parity tests on CPU and DCP resharding"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gonzalo Fuentes" }]
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.6",
+    "safetensors>=0.4",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Repository = "https://github.com/GonzaloFuentes1/parallelism-from-scratch"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/parallelism_from_scratch"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "C4", "PIE", "RET"]
+# Single-letter tensor names (B, T, H, D) follow the usual shape conventions in ML code.
+ignore = ["E741"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["parallelism_from_scratch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    # gloo emits this on some platforms when no network interface is configured explicitly.
+    "ignore::UserWarning:torch.distributed",
+]

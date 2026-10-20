@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "parallelism-from-scratch: readable DDP, ZeRO, tensor and pipeline parallelism for a tiny Llama"
+authors:
+  - family-names: Fuentes
+    given-names: Gonzalo
+version: 0.1.0
+date-released: 2026-10-20
+license: MIT
+repository-code: "https://github.com/GonzaloFuentes1/parallelism-from-scratch"
+keywords:
+  - distributed training
+  - LLM pretraining
+  - tensor parallelism
+  - pipeline parallelism
+  - ZeRO
+  - PyTorch
