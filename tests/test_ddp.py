@@ -10,7 +10,9 @@ from parallelism_from_scratch.model import LlamaConfig, build_reference, lm_loss
 
 CFG = LlamaConfig()
 LOCAL_BATCH, SEQ_LEN, STEPS = 2, 16, 3
-ATOL = 1e-12  # float64; observed differences are summation-order noise around 1e-17
+# float64; examples/parity_report.py measures about 1e-17 on gradients and 1e-14 on
+# parameters after 3 AdamW steps, so this leaves two orders of magnitude of margin.
+ATOL = 1e-12
 
 
 def _ddp_worker(rank: int, world_size: int, bucket_cap_bytes: int) -> None:
